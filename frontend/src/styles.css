@@ -171,3 +171,36 @@ svg { width: 100%; height: auto; display: block; }
 .choice-line { color: var(--muted); font-size: 12px; margin: 6px 0 0; font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+
+/* 分段落位复核 */
+.toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; cursor: pointer; user-select: none;
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px;
+  background: var(--panel-2);
+}
+.toggle input { width: auto; accent-color: var(--accent); cursor: pointer; }
+
+.staged-panel { border-color: #2f5d4c; }
+.staged-panel h2 .count { color: #7fd8b3; }
+.staged-summary { font-size: 12.5px; line-height: 1.8; margin: 2px 0 10px; }
+
+.stepper { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0 10px; }
+.stepper .dots { display: inline-flex; gap: 4px; }
+.stepper .dot {
+  min-width: 26px; padding: 2px 6px; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.stepper .dot.done { border-color: #1f6b51; color: var(--ok); }
+.stepper .dot.cur { background: #2357a8; border-color: #3b7bd8; font-weight: 700; }
+
+.step-head { border-top: 1px dashed var(--line); padding-top: 8px; margin-top: 4px; }
+.step-head h3 { margin: 0 0 4px; font-size: 13.5px; }
+
+.tried-list { margin-top: 8px; display: grid; gap: 6px; }
+.tried-row {
+  border: 1px solid #512d2d; border-radius: 6px; padding: 6px 8px;
+  background: rgba(248, 113, 113, 0.06);
+  display: grid; grid-template-columns: auto auto 1fr; gap: 8px;
+  align-items: center;
+}

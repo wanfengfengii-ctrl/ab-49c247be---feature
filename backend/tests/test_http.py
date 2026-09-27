@@ -108,3 +108,42 @@ def test_static_index_and_path_traversal(http_server):
         urllib.request.urlopen(
             http_server + "/..%2f..%2fetc%2fpasswd", timeout=5)
     assert exc_info.value.code in (403, 404)
+
+
+# ----------------------------------------------------- 分段落位复核
+
+def test_adjudicate_default_response_omits_staged_field(http_server):
+    with urllib.request.urlopen(http_server + "/api/sample", timeout=5) as r:
+        sample = json.loads(r.read())
+    status, report = _post(http_server, "/api/adjudicate", sample)
+    assert status == 200
+    assert "stagedReview" not in report
+
+
+def test_staged_review_sample_returns_safe_order(http_server):
+    with urllib.request.urlopen(http_server + "/api/sample", timeout=5) as r:
+        sample = json.loads(r.read())
+    sample["stagedReview"] = True
+    status, report = _post(http_server, "/api/adjudicate", sample)
+    assert status == 200
+    sr = report["stagedReview"]
+    assert sr["enabled"] is True and sr["feasible"] is True
+    assert sorted(sr["order"]) == list(range(len(sample["points"])))
+    assert len(sr["steps"]) == len(sample["points"])
+    for i, st in enumerate(sr["steps"], start=1):
+        assert st["step"] == i
+        assert {"step", "pointIndex", "pointName", "landed",
+                "affectedTriangles", "affectedEdges",
+                "crossChecks", "cumulative"} <= set(st)
+        assert all(t["preserved"] for t in st["affectedTriangles"])
+        assert all(e["within"] for e in st["affectedEdges"])
+        assert all(not c["intersect"] for c in st["crossChecks"])
+        assert len(st["cumulative"]["placed"]) == i
+
+
+def test_staged_review_bad_flag_returns_400(http_server):
+    with urllib.request.urlopen(http_server + "/api/sample", timeout=5) as r:
+        sample = json.loads(r.read())
+    sample["stagedReview"] = "yes"
+    status, body = _post(http_server, "/api/adjudicate", sample)
+    assert status == 400 and "stagedReview" in body["error"]
