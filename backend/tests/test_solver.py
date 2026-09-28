@@ -1,6 +1,8 @@
-"""裁决核心单元测试：纯几何谓词、三级优化目标与三类违约证据。"""
+"""裁决核心单元测试：纯几何谓词、三级优化目标、三类违约证据与分段落位复核。"""
 
 from __future__ import annotations
+
+import math
 
 import pytest
 
@@ -404,3 +406,272 @@ def test_rejects_index_out_of_range_and_duplicate_edge():
     payload["edges"].append({"endpoints": [0, 1], "minSq": 0, "maxSq": 10})
     with pytest.raises(AdjudicationError, match="重复"):
         adjudicate(payload)
+
+
+# --------------------------------------------------------------- 分段落位复核
+
+def _staging_detour_payload():
+    # A(0,0) B(10,0) X(5,1)：A cheap [0,2](²4) 单独落位使三角面退化(面积0)，
+    # B cheap [-6,1](²37) 单独落位使三角面翻转(面积-1)，二者同落面积恢复为1；
+    # X 横移 [1,0](²1) 可在二者之前先行解锁；A 的 [-6,2](²40) 为可单独落位绕行。
+    return {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 10, "y": 0},
+            {"name": "X", "x": 5, "y": 1},
+            {"name": "D", "x": 16, "y": 4},
+            {"name": "E", "x": -6, "y": 5},
+        ],
+        "triangles": [[0, 1, 2]],
+        "edges": [{"endpoints": [0, 1], "minSq": 0, "maxSq": 100_000}],
+        "candidates": [
+            [[0, 2], [-6, 2]],
+            [[-6, 1], [6, 2]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+
+
+def _staging_deadlock_payload():
+    # 凸五边形；锁死 AB 长度²=58。B cheap [-3,3] 落 (7,3) 恰在 AC 线上使
+    # 三角面 ABC 退化（面积 0）；C cheap [0,12] 配合后终态可行，但 C 先动
+    # 会让锁死的 AB 仍为 100。任何点都无法第 1 步安全落位。
+    return {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 10, "y": 0},
+            {"name": "C", "x": 14, "y": 6},
+            {"name": "D", "x": 6, "y": 12},
+            {"name": "E", "x": -4, "y": 6},
+        ],
+        "triangles": [[0, 1, 2], [0, 2, 3], [0, 3, 4]],
+        "edges": [{"endpoints": [0, 1], "minSq": 58, "maxSq": 58}],
+        "candidates": [
+            [[0, 0], [1, 0]],
+            [[-3, 3], [6, 6]],
+            [[0, 12], [0, -1]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+
+
+def test_staging_disabled_report_is_unchanged():
+    base = _staging_detour_payload()
+    on = adjudicate({**base, "stagingReview": False})
+    off = adjudicate(base)
+    assert "stagingReview" not in off
+    assert off == on
+    # 显式 false 与缺省均不应出现分段落位字段
+    assert "stagingReview" not in adjudicate(
+        {**_staging_deadlock_payload(), "stagingReview": False})
+
+
+def test_staging_rejects_non_boolean_flag():
+    with pytest.raises(AdjudicationError, match="布尔"):
+        adjudicate({**_staging_detour_payload(), "stagingReview": "yes"})
+    with pytest.raises(AdjudicationError, match="布尔"):
+        adjudicate({**_staging_detour_payload(), "stagingReview": 1})
+
+
+def test_staging_joint_choice_differs_from_static_best():
+    # 关键性质：不是先选静态最优再试排。
+    base = _staging_detour_payload()
+    off = adjudicate(base)
+    assert off["choice"] == [0, 0, 0, 0, 0]
+    assert off["objective"] == {"maxSq": 37, "sumSq": 41}
+
+    on = adjudicate({**base, "stagingReview": True})
+    assert on["feasible"] is True
+    # X 改取候选 1（平方 41→42）为静态最优组合解锁：联合裁决改选次优静态组合
+    assert on["choice"] == [0, 0, 1, 0, 0]
+    assert on["objective"] == {"maxSq": 37, "sumSq": 42}
+
+
+def test_staging_safe_order_and_peak_profile():
+    on = adjudicate({**_staging_detour_payload(), "stagingReview": True})
+    st = on["stagingReview"]
+    assert st["feasible"] is True
+    assert st["totalOrders"] == math.factorial(5)
+    assert st["safeOrderCount"] == 20
+    # 不动点 D(3)<E(4) 先行，X(2) 解锁，随后 A(0)²4、B(1)²37
+    assert st["order"] == [3, 4, 2, 0, 1]
+    assert st["stepPeakSq"] == [0, 0, 1, 4, 37]
+    assert st["maxStepSq"] == 37
+    assert st["orderNames"] == ["D", "E", "X", "A", "B"]
+
+
+def test_staging_steps_carry_exact_evidence():
+    on = adjudicate({**_staging_detour_payload(), "stagingReview": True})
+    steps = on["stagingReview"]["steps"]
+    assert len(steps) == 5
+    for k, s in enumerate(steps, start=1):
+        assert s["step"] == k
+        assert len(s["placed"]) == k
+        assert s["pointIndex"] == s["placed"][-1]
+        # 累计状态中的已落位点都在目标位置
+        for idx in s["placed"]:
+            row = on["assignment"][idx]
+            assert s["movedPoints"][idx] == row["displaced"]
+    # 第 4 步落 A：三角面面积 10→2（退化临界但仍严格为正），边 AB² 100→104
+    s4 = steps[3]
+    assert (s4["pointIndex"], s4["displacement"]) == (0, [0, 2])
+    tri = s4["affectedTriangles"][0]
+    assert (tri["originalSignedArea2"], tri["previousSignedArea2"],
+            tri["actualSignedArea2"]) == (10, 10, 2)
+    edge = s4["affectedEdges"][0]
+    assert (edge["previousSq"], edge["actualSq"], edge["within"]) == (
+        100, 104, True)
+    # 第 5 步落 B：X 已横移至 (6,1)，面积保持 2、AB² 104→17，全部仍通过
+    s5 = steps[4]
+    assert s5["affectedTriangles"][0]["actualSignedArea2"] == 2
+    assert s5["affectedEdges"][0]["actualSq"] == 17
+    assert all(c["intersect"] is False for c in s5["crossChecks"])
+
+
+def test_staging_deadlock_blocked_evidence():
+    on = adjudicate({**_staging_deadlock_payload(),
+                     "stagingReview": True})
+    # 静态终态可行，但无任何安全落位顺序
+    assert on["feasible"] is False
+    assert on["firstViolation"] is None
+    st = on["stagingReview"]
+    assert st["feasible"] is False
+    assert st["blockedStep"] == 1
+    assert st["placed"] == []
+    assert {a["pointIndex"] for a in st["attempts"]} == {0, 1, 2, 3, 4}
+    # 每个尝试点都带候选、位移和首条违约精确数值
+    for a in st["attempts"]:
+        assert {"pointIndex", "candidateIndex", "displacement",
+                "displacementSq", "displaced", "movedPoints",
+                "violation"} <= set(a)
+        assert a["violation"]["kind"] in {"orientation", "length", "crossing"}
+        assert a["violation"]["message"]
+    # 首条违约按 朝向→边长→相交 取：B 使三角面退化为面积 0
+    assert st["firstViolation"]["kind"] == "orientation"
+    assert st["firstViolationPointIndex"] == 1
+    assert st["firstViolation"]["actualSignedArea2"] == 0
+    # 顶层几何表展示静态最优组合（终态全部通过）
+    assert all(t["preserved"] for t in on["triangles"])
+    assert all(e["within"] for e in on["edges"])
+
+
+def test_staging_deadlock_differs_from_static_infeasible():
+    # 锁到几何上不可能的长度：连静态可行组合都没有
+    p = _staging_deadlock_payload()
+    p["edges"][0] = {"endpoints": [0, 1], "minSq": 9_999_999,
+                     "maxSq": 9_999_999}
+    on = adjudicate({**p, "stagingReview": True})
+    assert on["feasible"] is False
+    assert on["firstViolation"] is not None
+    st = on["stagingReview"]
+    assert st["feasible"] is False
+    assert st["reason"] == "noStaticFeasibleCombination"
+    assert "blockedStep" not in st
+
+
+def test_staging_zero_displacement_all_orders_safe():
+    # 全部点零位移：终态即基线，每条顺序都安全，次序按点序号字典序最小
+    payload = _payload(candidates=[
+        [[0, 0], [1, 0]], [[0, 0], [1, 0]], [[0, 0], [1, 0]],
+        [[0, 0], [1, 0]], [[0, 0], [1, 0]],
+    ])
+    on = adjudicate({**payload, "stagingReview": True})
+    st = on["stagingReview"]
+    assert st["feasible"] is True
+    assert st["safeOrderCount"] == math.factorial(5)
+    assert st["order"] == [0, 1, 2, 3, 4]
+    assert st["stepPeakSq"] == [0, 0, 0, 0, 0]
+
+
+def test_staging_step_peak_profile_ordering():
+    # 全部顺序安全时，逐步峰值轮廓最小（位移平方升序，同分按点序号）
+    payload = {
+        "points": _five_points(),
+        "triangles": _fan_triangles(),
+        "edges": [
+            {"endpoints": [u, v], "minSq": 0, "maxSq": 1_000_000}
+            for u, v in _PAIRS
+        ],
+        # 采用候选平方：A4 B1 C4 D0 E1
+        "candidates": [
+            [[0, 2], [0, 5]],
+            [[1, 0], [5, 0]],
+            [[2, 0], [5, 5]],
+            [[0, 0], [3, 3]],
+            [[1, 0], [-4, 0]],
+        ],
+    }
+    st = adjudicate({**payload, "stagingReview": True})["stagingReview"]
+    assert st["order"] == [3, 1, 4, 0, 2]
+    assert st["stepPeakSq"] == [0, 1, 1, 4, 4]
+
+
+def test_staging_engine_matches_bruteforce_dfs():
+    # 属性校验：位集引擎对每个候选组合给出的可达性与安全次序计数，
+    # 必须与独立的暴力子集 DFS 完全一致。
+    import functools
+    import itertools
+
+    from app import solver as S
+
+    base = _staging_deadlock_payload()
+    pts = base["points"]
+    n = len(pts)
+    origin = [(p["x"], p["y"]) for p in pts]
+    tris = base["triangles"]
+    edges = base["edges"]
+    base_area = [S._signed_area2(origin, t) for t in tris]
+    patterns = S._member_patterns(n)
+
+    def mixed_state(choice, mask):
+        pos = list(origin)
+        for i in range(n):
+            if (mask >> i) & 1:
+                dx, dy = base["candidates"][i][choice[i]]
+                pos[i] = (origin[i][0] + dx, origin[i][1] + dy)
+        return pos
+
+    full = (1 << n) - 1
+    checked = 0
+    for choice in itertools.product(range(2), repeat=n):
+        choice_l = list(choice)
+        target = mixed_state(choice, full)
+
+        @functools.cache
+        def good(mask):
+            if mask == 0:
+                return True  # 基线为施工起点
+            return S._first_constraint_violation(
+                pts, tris, edges, [], base_area,
+                mixed_state(choice, mask)) is None
+
+        @functools.cache
+        def ways(mask):
+            if mask == 0:
+                return 1
+            if not good(mask):
+                return 0
+            total = 0
+            bits = mask
+            while bits:
+                bit = bits & -bits
+                bits ^= bit
+                total += ways(mask ^ bit)
+            return total
+
+        tb, eb, pb = S._staging_constraint_bitsets(
+            tris, edges, [], base_area, origin, target, choice_l, n, {})
+        fast_ok = S._staging_reachable_fast(n, tb, eb, pb, patterns)
+        detail = S._joint_staging(pts, tris, edges, [], base_area, origin,
+                                  base["candidates"], choice_l, {})
+        slow_ok = ways(full) > 0
+        assert fast_ok == slow_ok, choice
+        assert detail["feasible"] == slow_ok, choice
+        assert detail["safeOrderCount"] == ways(full), choice
+        good.cache_clear()
+        ways.cache_clear()
+        checked += 1
+    assert checked == 2 ** n

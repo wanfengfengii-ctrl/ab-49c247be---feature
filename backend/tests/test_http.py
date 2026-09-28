@@ -83,6 +83,82 @@ def test_sample_adjudication_smoke(http_server):
     assert all("actualSignedArea2" in row for row in report["triangles"])
 
 
+def _deadlock_sample():
+    # 与 test_solver 的分段落位死锁夹具一致
+    return {
+        "points": [
+            {"name": "A", "x": 0, "y": 0},
+            {"name": "B", "x": 10, "y": 0},
+            {"name": "C", "x": 14, "y": 6},
+            {"name": "D", "x": 6, "y": 12},
+            {"name": "E", "x": -4, "y": 6},
+        ],
+        "triangles": [[0, 1, 2], [0, 2, 3], [0, 3, 4]],
+        "edges": [{"endpoints": [0, 1], "minSq": 58, "maxSq": 58}],
+        "candidates": [
+            [[0, 0], [1, 0]],
+            [[-3, 3], [6, 6]],
+            [[0, 12], [0, -1]],
+            [[0, 0], [1, 0]],
+            [[0, 0], [1, 0]],
+        ],
+    }
+
+
+def test_staging_disabled_response_has_no_review_field(http_server):
+    status, report = _post(http_server, "/api/adjudicate",
+                           _deadlock_sample())
+    assert status == 200
+    assert "stagingReview" not in report
+    # 显式 false 与缺省返回完全一致
+    status2, report2 = _post(http_server, "/api/adjudicate",
+                             {**_deadlock_sample(),
+                              "stagingReview": False})
+    assert status2 == 200
+    assert report2 == report
+
+
+def test_staging_enabled_safe_order_report(http_server):
+    with urllib.request.urlopen(http_server + "/api/sample", timeout=5) as r:
+        sample = json.loads(r.read())
+    status, report = _post(http_server, "/api/adjudicate",
+                           {**sample, "stagingReview": True})
+    assert status == 200
+    assert report["feasible"] is True
+    st = report["stagingReview"]
+    assert st["enabled"] is True and st["feasible"] is True
+    assert len(st["order"]) == len(sample["points"])
+    assert len(st["steps"]) == len(sample["points"])
+    assert st["safeOrderCount"] >= 1
+    step = st["steps"][0]
+    assert {"step", "pointIndex", "displacement", "affectedTriangles",
+            "affectedEdges", "crossChecks", "cumulativePeakSq",
+            "movedPoints"} <= set(step)
+
+
+def test_staging_enabled_blocked_order_report(http_server):
+    status, report = _post(http_server, "/api/adjudicate",
+                           {**_deadlock_sample(),
+                            "stagingReview": True})
+    assert status == 200
+    assert report["feasible"] is False
+    st = report["stagingReview"]
+    assert st["enabled"] is True and st["feasible"] is False
+    assert st["blockedStep"] == 1
+    assert st["placed"] == []
+    assert len(st["attempts"]) == 5
+    assert all({"displacement", "candidateIndex", "violation"}
+               <= set(a) for a in st["attempts"])
+    assert st["firstViolation"]["kind"] == "orientation"
+
+
+def test_staging_non_boolean_flag_returns_400(http_server):
+    status, body = _post(http_server, "/api/adjudicate",
+                         {**_deadlock_sample(), "stagingReview": "true"})
+    assert status == 400
+    assert "布尔" in body["error"]
+
+
 def test_bad_payload_returns_400(http_server):
     status, body = _post(http_server, "/api/adjudicate", {"points": []})
     assert status == 400
